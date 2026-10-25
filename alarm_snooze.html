@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0c11">
+<title>WakeCast</title>
+
+<!-- obs-websocket-js: lets this page talk to OBS. Loaded from a CDN, nothing to install. -->
+<script src="https://cdn.jsdelivr.net/npm/obs-websocket-js@5.0.6/dist/obs-ws.global.js"></script>
+
+<style>
+  /* =====================================================================
+     DESIGN ONLY. Everything in this <style> block is looks and layout.
+     The page logic lives in the <script> blocks further down.
+     RULE: never rename an id="..." or an onclick="..." in the markup.
+     ===================================================================== */
+
+  /* lets the background glow fade smoothly between alarm states */
+  @property --glow { syntax: "<color>"; inherits: true; initial-value: rgba(108, 140, 255, 0.16); }
+
+  :root {
+    --bg: #0d0716;
+    --surface: rgba(255, 255, 255, 0.055);
+    --surface-2: rgba(255, 255, 255, 0.10);
+    --border: rgba(255, 255, 255, 0.13);
+    --border-strong: rgba(255, 255, 255, 0.24);
+    --text: #f5f7fc;
+    --muted: #c3cadb;                 /* secondary text: labels, hints (was a dim grey) */
+    --faint: #9ca6bd;                 /* placeholders and the least important text */
+    --accent: #8b7bff;
+    --accent-2: #c06bff;
+    --ringc: #6c8cff;                 /* colour of the countdown ring */
+    --ring: rgba(108, 140, 255, 0.45); /* glow around banner / ring */
+    --ease: cubic-bezier(0.2, 0.75, 0.2, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    --glow: rgba(168, 98, 255, 0.34);
+    background:
+      radial-gradient(900px 520px at 50% -8%, var(--glow), transparent 70%),
+      linear-gradient(180deg, #160a26 0%, #0d0716 60%, #0a0512 100%);
+    background-attachment: fixed;
+    transition: --glow 0.9s ease;
+  }
+
+  /* the whole page mood follows the alarm state (driven by the banner's class) */
+  body:has(#banner.armed)   { --glow: rgba(108, 140, 255, 0.30); }
+  body:has(#banner.ringing) { --glow: rgba(251, 146, 60, 0.38);  --ringc: #fb923c; --ring: rgba(251, 146, 60, 0.5); }
+  body:has(#banner.snoozed) { --glow: rgba(167, 139, 250, 0.32); --ringc: #a78bfa; --ring: rgba(167, 139, 250, 0.5); }
+  body:has(#banner.live)    { --glow: rgba(248, 113, 113, 0.42); --ringc: #f87171; --ring: rgba(248, 113, 113, 0.55); }
+
+  /* animated purple aurora behind everything */
+  body::before, body::after {
+    content: ""; position: fixed; inset: -20%; z-index: -1; pointer-events: none;
+  }
+  body::before {
+    background:
+      radial-gradient(38% 34% at 25% 30%, rgba(168, 85, 247, 0.38), transparent 70%),
+      radial-gradient(34% 30% at 75% 25%, rgba(236, 72, 153, 0.22), transparent 70%),
+      radial-gradient(40% 36% at 60% 80%, rgba(99, 102, 241, 0.30), transparent 70%),
+      radial-gradient(30% 28% at 15% 85%, rgba(192, 107, 255, 0.26), transparent 70%);
+    filter: blur(30px);
+    animation: aurora 22s ease-in-out infinite alternate;
+  }
+  body::after {
+    background:
+      radial-gradient(1.5px 1.5px at 12% 22%, rgba(255,255,255,0.8), transparent),
+      radial-gradient(1.5px 1.5px at 34% 68%, rgba(255,255,255,0.6), transparent),
+      radial-gradient(2px 2px at 58% 18%, rgba(230,200,255,0.8), transparent),
+      radial-gradient(1.5px 1.5px at 82% 54%, rgba(255,255,255,0.7), transparent),
+      radial-gradient(2px 2px at 90% 12%, rgba(230,200,255,0.7), transparent),
+      radial-gradient(1.5px 1.5px at 70% 88%, rgba(255,255,255,0.6), transparent),
+      radial-gradient(1.5px 1.5px at 22% 92%, rgba(230,200,255,0.7), transparent);
+    animation: twinkle 5s ease-in-out infinite alternate;
+  }
+  @keyframes aurora {
+    0%   { transform: translate(-4%, -3%) rotate(0deg) scale(1); }
+    50%  { transform: translate(5%, 4%) rotate(8deg) scale(1.12); }
+    100% { transform: translate(-2%, 6%) rotate(-6deg) scale(1.05); }
+  }
+  @keyframes twinkle { 0% { opacity: 0.25; } 100% { opacity: 0.95; } }
+
+  main { position: relative; z-index: 1; max-width: 920px; margin: 0 auto; padding: 32px 18px 72px; }
+
+  /* ---------- header ---------- */
+  .top { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    width: 48px; height: 48px; border-radius: 15px; flex: none;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 12px 32px -10px rgba(108, 140, 255, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  }
+  .logo svg { width: 26px; height: 26px; }
+  h1 {
+    margin: 0; font-size: 24px; font-weight: 750; letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #ffffff, #c9d4ff);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+  }
+  .sub { margin: 3px 0 0; color: var(--muted); font-size: 14.5px; }
+
+  /* ---------- clock + status banner ---------- */
+  .hero { text-align: center; margin-top: 30px; }
+  #clock {
+    font-size: clamp(56px, 15vw, 112px);
+    font-weight: 250;
+    letter-spacing: -0.035em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(180deg, #ffffff 30%, #b8c3df 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    filter: drop-shadow(0 0 36px var(--glow));
+  }
+  #clockDate { margin-top: 10px; color: var(--muted); font-size: 16px; letter-spacing: 0.01em; }
+
+  #banner {
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    max-width: 560px; margin: 24px auto 0; padding: 15px 22px;
+    border-radius: 18px; font-weight: 650; font-size: 16px;
+    color: #e9edf7;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: 0 14px 34px -22px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: background 0.4s, border-color 0.4s, color 0.4s;
+  }
+  #banner.armed   { background: rgba(108, 140, 255, 0.17); border-color: rgba(108, 140, 255, 0.50); color: #dbe3ff; }
+  #banner.ringing { background: rgba(251, 146, 60, 0.19);  border-color: rgba(251, 146, 60, 0.65);  color: #ffe6d2; animation: breathe 1.2s ease-in-out infinite; }
+  #banner.snoozed { background: rgba(167, 139, 250, 0.18); border-color: rgba(167, 139, 250, 0.55); color: #ebe4ff; }
+  #banner.live    { background: rgba(248, 113, 113, 0.20); border-color: rgba(248, 113, 113, 0.65); color: #ffe0e0; animation: breathe 1.6s ease-in-out infinite; }
+  @keyframes breathe {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50%      { box-shadow: 0 0 34px 2px var(--ring); }
+  }
+
+  /* ---------- cards ---------- */
+  .setup-grid { display: grid; gap: 18px; margin-top: 30px; grid-template-columns: 1fr; }
+  @media (min-width: 760px) { .setup-grid { grid-template-columns: 1fr 1fr; align-items: stretch; } }
+
+  .card {
+    position: relative;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.035));
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 24px;
+    box-shadow: 0 24px 60px -28px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.09);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    animation: rise 0.55s var(--ease) both;
+  }
+  .setup-grid .card:nth-child(2) { animation-delay: 0.08s; }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+  .title {
+    display: flex; align-items: center; gap: 11px;
+    font-size: 17px; font-weight: 700; letter-spacing: -0.005em;
+    padding-bottom: 14px; margin-bottom: 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  .step {
+    width: 28px; height: 28px; border-radius: 10px; display: grid; place-items: center;
+    font-size: 14px; font-weight: 700; color: #fff;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 6px 16px -6px rgba(108, 140, 255, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  }
+
+  label { display: block; margin: 18px 0 7px; font-size: 13px; font-weight: 600; letter-spacing: 0.01em; color: var(--muted); }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  input {
+    width: 100%; padding: 13px 14px; border-radius: 13px;
+    border: 1px solid var(--border-strong);
+    background: rgba(0, 0, 0, 0.36);
+    color: var(--text); font: inherit; font-size: 16px; outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  }
+  input:hover { border-color: rgba(255, 255, 255, 0.34); }
+  input:focus { border-color: rgba(130, 158, 255, 0.95); box-shadow: 0 0 0 4px rgba(108, 140, 255, 0.22); background: rgba(0, 0, 0, 0.5); }
+  input::placeholder { color: var(--faint); }
+  #alarmTime { font-size: 38px; font-weight: 300; text-align: center; padding: 12px; letter-spacing: 0.03em; }
+
+  /* ---------- buttons ---------- */
+  button {
+    appearance: none; -webkit-appearance: none; border: 0; cursor: pointer;
+    width: 100%; margin-top: 12px; padding: 14px 18px; border-radius: 15px;
+    font: inherit; font-size: 15px; font-weight: 650; color: var(--text);
+    transition: transform 0.12s, filter 0.2s, box-shadow 0.25s, background 0.2s;
+  }
+  button:hover  { transform: translateY(-1px); filter: brightness(1.12); }
+  button:active { transform: translateY(0) scale(0.985); }
+  button:focus-visible { outline: 3px solid rgba(130, 158, 255, 0.75); outline-offset: 3px; }
+
+  .primary   { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 14px 30px -12px rgba(108, 140, 255, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
+  .secondary { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border-strong); }
+  .secondary:hover { background: rgba(255, 255, 255, 0.14); }
+  .snooze    { color: #1a1200; font-size: 17px; padding: 17px; background: linear-gradient(135deg, #fbbf24, #f59e0b); box-shadow: 0 14px 30px -12px rgba(245, 158, 11, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.4); }
+  .awake     { color: #03241a; font-size: 19px; padding: 19px; letter-spacing: 0.02em; background: linear-gradient(135deg, #34d399, #10b981); box-shadow: 0 14px 30px -12px rgba(16, 185, 129, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.35); }
+
+  /* ---------- small status lines ---------- */
+  small { display: block; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+  #obsStatus {
+    margin-top: 14px; padding: 11px 13px; border-radius: 12px;
+    color: #dde3f1;
+    background: rgba(0, 0, 0, 0.32); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+  }
+
+  /* tweet server: tick/cross row with a dropdown arrow for the details */
+  #tweetBox {
+    margin-top: 14px; border-radius: 12px;
+    background: rgba(0, 0, 0, 0.32); border: 1px solid var(--border);
+    border-left: 3px solid var(--faint);
+    color: #dde3f1;
+  }
+  #tweetBox.ok  { border-left-color: #34d399; }
+  #tweetBox.bad { border-left-color: #f87171; }
+  #tweetBox summary {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 11px 13px; cursor: pointer; list-style: none; user-select: none;
+    font-size: 15px; font-weight: 650; border-radius: 12px;
+  }
+  #tweetBox summary::-webkit-details-marker { display: none; }
+  #tweetBox summary:focus-visible { outline: 3px solid rgba(130, 158, 255, 0.75); outline-offset: 2px; }
+  #tweetBox.ok  #tweetStatus { color: #86efac; }
+  #tweetBox.bad #tweetStatus { color: #fca5a5; }
+  #tweetBox summary::after {
+    content: ""; width: 9px; height: 9px; flex: none; margin-right: 3px;
+    border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+    transform: rotate(45deg) translate(-2px, -2px);
+    transition: transform 0.25s var(--ease);
+  }
+  #tweetBox[open] summary::after { transform: rotate(-135deg) translate(-2px, -2px); }
+  #tweetDetail { padding: 0 13px 13px; font-size: 13.5px; line-height: 1.55; color: var(--muted); }
+  #tweetDetail p { margin: 0; }
+  #tweetDetail p + p { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+
+  /* ---------- ringing / snoozed / live panel ---------- */
+  .hidden { display: none !important; }
+
+  #ringBox {
+    max-width: 560px; margin: 24px auto 0; text-align: center; padding: 28px 24px 26px;
+    animation: pop 0.5s var(--ease) both;
+  }
+  @keyframes pop { from { opacity: 0; transform: translateY(16px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+  /* while the alarm panel is showing, tuck the setup cards away and shrink the clock */
+  body:has(#ringBox:not(.hidden)) .setup-grid { display: none; }
+  body:has(#ringBox:not(.hidden)) #clock { font-size: clamp(34px, 9vw, 52px); opacity: 0.8; }
+  body:has(#ringBox:not(.hidden)) #clockDate { display: none; }
+
+  .ring-wrap { position: relative; width: 232px; height: 232px; margin: 2px auto 12px; display: grid; place-items: center; }
+  .ring-wrap svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring-wrap .track { fill: none; stroke: rgba(255, 255, 255, 0.13); stroke-width: 5; }
+  .ring-wrap .prog {
+    fill: none; stroke: var(--ringc); stroke-width: 5; stroke-linecap: round;
+    transition: stroke-dashoffset 1s linear, stroke 0.5s;
+    filter: drop-shadow(0 0 8px var(--ring));
+  }
+  body:has(#banner.ringing) .ring-wrap { animation: throb 1.2s ease-in-out infinite; }
+  @keyframes throb { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.025); } }
+
+  #countdown {
+    position: relative; font-size: 70px; font-weight: 300; line-height: 1;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+  }
+  #countdown::after {
+    content: "until you go live"; display: block; margin-top: 10px;
+    font-size: 12px; font-weight: 650; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted);
+  }
+  body:has(#banner.snoozed) #countdown::after { content: "until it rings again"; }
+  body:has(#banner.live)    #countdown::after { content: "you are live"; color: #fecaca; }
+
+  /* ---------- wake-up code ---------- */
+  #codeBox {
+    position: relative; overflow: hidden; margin: 22px 0 14px; padding: 18px 12px 20px;
+    border-radius: 18px; background: rgba(0, 0, 0, 0.42); border: 1px solid rgba(251, 191, 36, 0.38);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+  #codeBox small { margin: 0 0 10px; font-size: 12px; font-weight: 650; letter-spacing: 0.12em; text-transform: uppercase; color: #e3e8f4; }
+  #codeText {
+    font-family: ui-monospace, "SF Mono", Consolas, "Courier New", monospace;
+    font-size: clamp(20px, 6vw, 30px); font-weight: 700; letter-spacing: 0.06em;
+    color: #fde68a; text-shadow: 0 0 22px rgba(251, 191, 36, 0.4);
+    word-break: break-all; user-select: none; -webkit-user-select: none;
+  }
+  #codeTimer {
+    margin-top: 12px; font-size: 20px; font-weight: 800; letter-spacing: 0.04em;
+    color: #fde68a; text-shadow: 0 0 14px rgba(251, 191, 36, 0.9), 0 0 30px rgba(251, 191, 36, 0.5);
+    animation: timerGlow 1.6s ease-in-out infinite;
+  }
+  @keyframes timerGlow {
+    0%, 100% { opacity: 0.8; text-shadow: 0 0 8px rgba(251, 191, 36, 0.6), 0 0 18px rgba(251, 191, 36, 0.3); }
+    50%      { opacity: 1;   text-shadow: 0 0 16px rgba(251, 191, 36, 1), 0 0 38px rgba(251, 191, 36, 0.7); }
+  }
+  /* last 5 seconds: turns red and blinks fast */
+  body:has(#codeBar.low) #codeTimer {
+    color: #ff9b9b; font-size: 22px;
+    text-shadow: 0 0 16px rgba(248, 113, 113, 1), 0 0 36px rgba(248, 113, 113, 0.7);
+    animation: timerBlink 0.5s steps(2, jump-none) infinite;
+  }
+  @keyframes timerBlink { 0% { opacity: 1; } 100% { opacity: 0.25; } }
+  #codeBar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255, 255, 255, 0.10); }
+  #codeBar i { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, #fbbf24, #f59e0b); transition: width 1s linear, background 0.3s; }
+  #codeBar.low i { background: #f87171; }
+
+  #codeInput {
+    text-align: center; font-family: ui-monospace, "SF Mono", Consolas, "Courier New", monospace;
+    font-size: 20px; letter-spacing: 0.08em; padding: 16px; border-radius: 15px;
+  }
+  #codeInput.shake { animation: shake 0.4s; }
+  @keyframes shake { 20%, 60% { transform: translateX(-6px); } 40%, 80% { transform: translateX(6px); } }
+  #codeMsg { margin-top: 10px; min-height: 22px; color: #fecaca; font-size: 14.5px; font-weight: 550; }
+
+  /* ---------- sparkles: tiny lights drifting up behind the page ---------- */
+  main::before {
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background-image:
+      radial-gradient(2.5px 2.5px at 20px 30px, #fff, transparent),
+      radial-gradient(2px 2px at 90px 120px, #e9d5ff, transparent),
+      radial-gradient(3px 3px at 160px 60px, #f0abfc, transparent),
+      radial-gradient(2px 2px at 60px 180px, #c7d2fe, transparent),
+      radial-gradient(2.5px 2.5px at 200px 150px, #fff, transparent);
+    background-size: 240px 240px;
+    filter: drop-shadow(0 0 5px #d8b4fe);
+    animation: sparkleDrift 40s linear infinite, sparkleFade 3.5s ease-in-out infinite alternate;
+  }
+  @keyframes sparkleDrift { to { background-position: 60px -480px; } }
+  @keyframes sparkleFade  { from { opacity: 0.35; } to { opacity: 1; } }
+
+  /* ---------- neon lightning border on the cards ---------- */
+  @property --ang { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+  .card::before {
+    content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 2px;
+    pointer-events: none;
+    background: conic-gradient(from var(--ang), transparent 0 55%, var(--accent-2) 70%, var(--ringc) 85%, #fff 92%, transparent 97%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    opacity: 0.5;
+    filter: drop-shadow(0 0 5px var(--accent-2)) drop-shadow(0 0 12px var(--ringc));
+    animation: neonSpin 9s linear infinite, neonFlicker 6s ease-in-out infinite;
+  }
+  @keyframes neonSpin { to { --ang: 360deg; } }
+  @keyframes neonFlicker { 0%, 100% { opacity: 0.5; } 50% { opacity: 0.32; } }
+
+  /* ---------- equal-height setup cards; roomier, larger text in card 1 ---------- */
+  .setup-grid .card { display: flex; flex-direction: column; }
+  .setup-grid .card:nth-child(1) label { font-size: 15px; margin: 24px 0 10px; }
+  .setup-grid .card:nth-child(1) input { font-size: 18px; padding: 17px 16px; }
+  .setup-grid .card:nth-child(1) button { margin-top: 22px; font-size: 16px; padding: 16px 18px; }
+  .setup-grid .card:nth-child(1) #obsStatus { margin-top: auto; font-size: 15px; line-height: 1.6; }
+
+  /* OBS status colour: green when connected, red otherwise */
+  #obsStatus.ok  { color: #86efac; border-left-color: #34d399; font-weight: 650; }
+  #obsStatus.bad { color: #fca5a5; border-left-color: #f87171; font-weight: 650; }
+
+  /* respect people who turn animations off in their system settings */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+  <header class="top">
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="13" r="7.5"></circle>
+        <path d="M12 9v4l2.5 2"></path>
+        <path d="M4.5 4.5 7.5 2M19.5 4.5 16.5 2"></path>
+      </svg>
+    </div>
+    <div>
+      <h1>WakeCast</h1>
+      <p class="sub">Don't wake up? Everybody gets to watch.</p>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div id="clock" aria-label="Current time">--:--:--</div>
+    <div id="clockDate"></div>
+    <div id="banner" role="status">Not armed</div>
+  </section>
+
+  <div class="setup-grid">
+
+    <!-- STEP 1: connect to OBS -->
+    <div class="card">
+      <b class="title"><span class="step">1</span>Connect to OBS</b>
+      <label>OBS WebSocket address</label>
+      <input id="obsUrl" value="ws://localhost:4455">
+      <label>OBS WebSocket password</label>
+      <input id="obsPass" type="password" placeholder="the password you set in OBS">
+      <button class="secondary" onclick="connectOBS()">Connect</button>
+      <small id="obsStatus">Not connected</small>
+    </div>
+
+    <!-- STEP 2: set alarm -->
+    <div class="card">
+      <b class="title"><span class="step">2</span>Set the alarm</b>
+      <label>Wake-up time</label>
+      <input id="alarmTime" type="time" value="06:30">
+      <div class="row">
+        <div>
+          <label>Grace before going live (seconds)</label>
+          <input id="graceSeconds" type="number" value="60" min="5">
+        </div>
+        <div>
+          <label>Snooze length (seconds)</label>
+          <input id="snoozeSeconds" type="number" value="120" min="10">
+        </div>
+      </div>
+      <button class="primary" onclick="armAlarm()">Arm alarm</button>
+      <button class="secondary" onclick="ringNow()">Test it now (demo mode)</button>
+      <details id="tweetBox">
+        <summary><span id="tweetStatus">… Tweet server</span></summary>
+        <div id="tweetDetail">
+          <p id="tweetMsg">Checking the tweet server...</p>
+          <p>Keep this tab open; disable laptop sleep.</p>
+        </div>
+      </details>
+    </div>
+
+  </div>
+
+  <!-- Shown while ringing / snoozed / live -->
+  <div id="ringBox" class="card hidden">
+    <div class="ring-wrap">
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        <circle class="track" cx="60" cy="60" r="52"></circle>
+        <circle id="ringProg" class="prog" cx="60" cy="60" r="52"></circle>
+      </svg>
+      <div id="countdown">60</div>
+    </div>
+    <button id="snoozeBtn" class="snooze" onclick="snooze()">SNOOZE (posts a tweet)</button>
+    <div id="codeBox">
+      <small>Type this code exactly to turn off the alarm</small>
+      <div id="codeText">----------------</div>
+      <div id="codeTimer"></div>
+      <div id="codeBar"><i></i></div>
+    </div>
+    <input id="codeInput" type="text" maxlength="16" autocomplete="off" autocapitalize="off"
+           spellcheck="false" placeholder="type the 16-character code"
+           onpaste="return false" ondrop="return false"
+           onkeydown="if (event.key === 'Enter') imAwake()">
+    <div id="codeMsg"></div>
+    <button class="awake" onclick="imAwake()">I'M AWAKE</button>
+  </div>
+
+</main>
+
+<script>
+// ---------- STATE ----------
+// If the library failed to load, don't crash the whole page: show a clear message instead
+const obs = (typeof OBSWebSocket !== "undefined") ? new OBSWebSocket() : null;
+if (!obs) {
+  window.addEventListener("load", () => {
+    document.getElementById("obsStatus").textContent =
+      "❌ OBS library failed to load. Check your internet, or try your phone hotspot, then reload.";
+  });
+}
+let obsConnected = false;
+let alarmTimer = null;              // checks the clock every second
+let countdownTimer = null;          // counts down the grace period
+let snoozeTimer = null;             // counts down the snooze
+let beepTimer = null;               // repeats the alarm beep
+let audioCtx = null;                // browser audio engine
+let wakeLock = null;                // keeps the screen on
+let state = "idle";                 // idle | armed | ringing | snoozed | live
+
+// ---------- SMALL HELPERS ----------
+const $ = id => document.getElementById(id);
+
+function setBanner(text, cls) {
+  $("banner").textContent = text;
+  $("banner").className = cls || "";
+}
+
+// ---------- TWEET SERVER (tweet_server.py, runs on this computer) ----------
+// This page is served by tweet_server.py, so the server is simply "this same address".
+const TWEET_SERVER = "";
+
+// Fire-and-forget: the server answers instantly and posts in the background.
+// If it is not running or Chrome is closed, snooze still works; only the tweet is skipped.
+function sendTweet() {
+  try {
+    fetch(TWEET_SERVER + "/tweet", { method: "POST", mode: "no-cors", body: "snooze" })
+      .catch(e => console.error("Tweet server not reachable:", e));
+  } catch (e) { console.error(e); }
+}
+
+function setTweetStatus(ok, detail) {
+  $("tweetStatus").textContent = (ok ? "✔ " : "✖ ") + "Tweet server";
+  $("tweetBox").className = ok ? "ok" : "bad";
+  $("tweetMsg").textContent = detail;
+}
+
+async function checkTweetServer() {
+  if (location.protocol === "file:") {
+    setTweetStatus(false, "Open via start_all.bat to enable tweets.");
+    return;
+  }
+  try {
+    const r = await fetch(TWEET_SERVER + "/status");
+    const t = await r.text();
+    const msg = {
+      "ready": "Ready.",
+      "x-checking": "Checking X login...",
+      "x-logged-out": "X is logged out. Log in via start_chrome.bat.",
+      "chrome-missing": "Chrome is closed. Run start_chrome.bat."
+    };
+    setTweetStatus(t === "ready", msg[t] || t);
+  } catch (e) {
+    setTweetStatus(false, "Not running. Run start_all.bat.");
+  }
+}
+window.addEventListener("load", () => { checkTweetServer(); setInterval(checkTweetServer, 10000); });
+
+// ---------- OBS CONNECTION ----------
+async function connectOBS() {
+  if (!obs) {
+    $("obsStatus").textContent = "❌ OBS library not loaded. Reload the page on a working internet connection.";
+    return;
+  }
+  try {
+    await obs.connect($("obsUrl").value, $("obsPass").value);
+    obsConnected = true;
+    $("obsStatus").textContent = "Connected to OBS ✔";
+  } catch (e) {
+    obsConnected = false;
+    $("obsStatus").textContent = "Failed: " + e.message +
+      " (is OBS open and WebSocket enabled?)";
+  }
+}
+
+async function startStream() {
+  if (!obsConnected) { alert("Connect to OBS first!"); return; }
+  try {
+    const s = await obs.call("GetStreamStatus");
+    if (!s.outputActive) await obs.call("StartStream");
+  } catch (e) { alert("Could not start stream: " + e.message); }
+}
+
+async function stopStream() {
+  if (!obsConnected) return;
+  try {
+    const s = await obs.call("GetStreamStatus");
+    if (s.outputActive) await obs.call("StopStream");
+  } catch (e) { console.error(e); }
+}
+
+// ---------- ALARM SOUND (generated, no mp3 needed) ----------
+let beepRate = 500;                 // current gap between beeps (ms)
+
+function startBeeping(intervalMs = 500, freq = 880) {
+  clearInterval(beepTimer);         // never run two beep loops at once
+  beepRate = intervalMs;
+  beepTimer = setInterval(() => {
+    const osc = audioCtx.createOscillator();
+    osc.type = "square";
+    osc.frequency.value = freq;
+    osc.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.15);
+  }, intervalMs);
+}
+function stopBeeping() { clearInterval(beepTimer); beepTimer = null; }
+
+// Rising siren: plays once at the moment the stream goes live
+function playLiveSound() {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = "sawtooth";
+  osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(1600, audioCtx.currentTime + 1.2);
+  gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 1.4);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 1.4);
+}
+
+// ---------- ARMING ----------
+async function armAlarm() {
+  // Creating audio on a button click satisfies the browser's autoplay rules
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume();
+
+  // Keep the screen awake (works in Chrome)
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+
+  state = "armed";
+  setBanner("Armed for " + $("alarmTime").value + " 😴", "armed");
+
+  clearInterval(alarmTimer);
+  alarmTimer = setInterval(() => {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    if (state === "armed" && (hh + ":" + mm) === $("alarmTime").value) ringNow();
+  }, 1000);
+}
+
+// ---------- RINGING + COUNTDOWN ----------
+async function ringNow() {
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  await audioCtx.resume();
+
+  clearInterval(snoozeTimer);       // in case we are coming back from a snooze
+  state = "ringing";
+  let remaining = parseInt($("graceSeconds").value, 10) || 60;
+  $("ringBox").classList.remove("hidden");
+  $("snoozeBtn").classList.remove("hidden");
+  $("countdown").textContent = remaining;
+  setBanner("⏰ WAKE UP! Going live in " + remaining + "s", "ringing");
+  startCodeRotation();              // wake-up code must be typed to turn the alarm off
+  startBeeping();
+
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(async () => {
+    remaining--;
+    $("countdown").textContent = remaining;
+    // Last 10 seconds: faster, higher beeps as a warning
+    if (remaining <= 10 && remaining > 0 && beepRate !== 250) {
+      startBeeping(250, 1320);
+    }
+    setBanner("⏰ WAKE UP! Going live in " + remaining + "s", "ringing");
+    if (remaining <= 0) {
+      clearInterval(countdownTimer);
+      goLive();
+    }
+  }, 1000);
+}
+
+// ---------- SNOOZE ----------
+// Only while ringing (before the stream goes live). Every press posts one tweet.
+function snooze() {
+  if (state !== "ringing") return;
+
+  clearInterval(countdownTimer);
+  stopBeeping();
+  state = "snoozed";
+  $("snoozeBtn").classList.add("hidden");   // can't snooze again until it rings again
+
+  sendTweet();                               // <-- the tweet bot is triggered here
+
+  let remaining = parseInt($("snoozeSeconds").value, 10) || 120;
+  $("countdown").textContent = remaining;
+  setBanner("😴 Snoozed: ringing again in " + remaining + "s", "snoozed");
+
+  clearInterval(snoozeTimer);
+  snoozeTimer = setInterval(() => {
+    remaining--;
+    $("countdown").textContent = remaining;
+    setBanner("😴 Snoozed: ringing again in " + remaining + "s", "snoozed");
+    if (remaining <= 0) {
+      clearInterval(snoozeTimer);
+      ringNow();                             // rings again with a fresh grace period
+    }
+  }, 1000);
+}
+
+// ---------- GOING LIVE ----------
+async function goLive() {
+  state = "live";
+  $("snoozeBtn").classList.add("hidden");
+  setBanner("🔴 LIVE: you are being watched while asleep", "live");
+  stopBeeping();
+  playLiveSound();                  // siren at the moment of going live
+  await startStream();
+  // after the siren, go back to slow beeping until the sleeper presses the button
+  setTimeout(() => { if (state === "live") startBeeping(500, 880); }, 1500);
+}
+
+// ---------- WAKE-UP CODE ----------
+// 16 characters: at least one uppercase, lowercase, digit and special character.
+// A new code is generated every 30 seconds. Look-alike characters (I l O 0 1) are left out
+// so the code is brutal to type but never impossible to read.
+const CODE_LENGTH = 16;
+const CODE_REFRESH_SECONDS = 30;
+const CODE_SETS = [
+  "ABCDEFGHJKLMNPQRSTUVWXYZ",
+  "abcdefghijkmnopqrstuvwxyz",
+  "23456789",
+  "!@#$%^&*?+=-_"
+];
+let currentCode = "";
+let codeTimer = null;
+let codeLeft = 0;
+
+function randInt(max) {                       // unbiased random number from 0 to max-1
+  const buf = new Uint32Array(1);
+  const limit = Math.floor(0x100000000 / max) * max;
+  do { crypto.getRandomValues(buf); } while (buf[0] >= limit);
+  return buf[0] % max;
+}
+
+function makeCode() {
+  const all = CODE_SETS.join("");
+  const chars = CODE_SETS.map(s => s[randInt(s.length)]);     // one from each group
+  while (chars.length < CODE_LENGTH) chars.push(all[randInt(all.length)]);
+  for (let i = chars.length - 1; i > 0; i--) {                // shuffle
+    const j = randInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
+
+function newCode() {
+  currentCode = makeCode();
+  codeLeft = CODE_REFRESH_SECONDS;
+  $("codeText").textContent = currentCode;
+  $("codeInput").value = "";                  // old attempt no longer matches
+  $("codeMsg").textContent = "";
+}
+
+function startCodeRotation() {
+  if (codeTimer) return;                      // already running (e.g. coming back from a snooze)
+  newCode();
+  $("codeTimer").textContent = "New code in " + codeLeft + "s";
+  codeTimer = setInterval(() => {
+    codeLeft--;
+    if (codeLeft <= 0) newCode();
+    $("codeTimer").textContent = "New code in " + codeLeft + "s";
+  }, 1000);
+}
+
+function stopCodeRotation() {
+  clearInterval(codeTimer);
+  codeTimer = null;
+  currentCode = "";
+  $("codeText").textContent = "----------------";
+  $("codeInput").value = "";
+  $("codeMsg").textContent = "";
+}
+
+// ---------- I'M AWAKE ----------
+// Only works if the typed text matches the code currently on screen.
+async function imAwake() {
+  if ($("codeInput").value !== currentCode || !currentCode) {
+    $("codeMsg").textContent = "Wrong code. Type the one on screen exactly (case matters).";
+    $("codeInput").value = "";
+    return;
+  }
+  stopCodeRotation();
+  clearInterval(countdownTimer);
+  clearInterval(snoozeTimer);
+  stopBeeping();
+  await stopStream();
+  $("ringBox").classList.add("hidden");
+  state = "idle";
+  setBanner("Good morning! Stream stopped ☀️", "");
+}
+</script>
+
+<script>
+// ---------- DESIGN-ONLY HELPERS ----------
+// These only change how the page LOOKS (clock, countdown ring, code timer bar, focus, shake).
+// They only read values from the alarm script and never change alarm, OBS or tweet behaviour.
+// Wrapped in try/catch so that if anything here fails, the alarm still works.
+(function () {
+  try {
+    const el = id => document.getElementById(id);
+
+    // live clock + date
+    function clockTick() {
+      const d = new Date();
+      el("clock").textContent = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+      el("clockDate").textContent = d.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
+    }
+    clockTick();
+    setInterval(clockTick, 1000);
+
+    // countdown ring + code timer bar (read-only)
+    const C = 2 * Math.PI * 52;
+    const prog = el("ringProg");
+    prog.style.strokeDasharray = String(C);
+    prog.style.strokeDashoffset = "0";
+    const bar = el("codeBar");
+    const barFill = bar.querySelector("i");
+    let lastRing = "", lastBar = "";
+
+    setInterval(function () {
+      try {
+        const remaining = parseInt(el("countdown").textContent, 10);
+        const snoozed = (typeof state !== "undefined" && state === "snoozed");
+        const live = (typeof state !== "undefined" && state === "live");
+        const total = snoozed ? (parseInt(el("snoozeSeconds").value, 10) || 120)
+                              : (parseInt(el("graceSeconds").value, 10) || 60);
+        let pct = live ? 0 : remaining / total;
+        pct = Math.max(0, Math.min(1, isNaN(pct) ? 1 : pct));
+        const off = (C * (1 - pct)).toFixed(1);
+        if (off !== lastRing) { prog.style.strokeDashoffset = off; lastRing = off; }
+
+        if (typeof codeLeft !== "undefined" && typeof CODE_REFRESH_SECONDS !== "undefined") {
+          const frac = Math.max(0, Math.min(1, codeLeft / CODE_REFRESH_SECONDS));
+          const w = (frac * 100).toFixed(1) + "%";
+          if (w !== lastBar) {
+            barFill.style.width = w;
+            bar.classList.toggle("low", codeLeft <= 5);
+            lastBar = w;
+          }
+        }
+      } catch (e) {}
+    }, 250);
+
+    // when the alarm panel appears, put the cursor in the code box
+    const box = el("ringBox");
+    new MutationObserver(function () {
+      if (!box.classList.contains("hidden")) setTimeout(function () { el("codeInput").focus(); }, 150);
+    }).observe(box, { attributes: true, attributeFilter: ["class"] });
+
+    // colour the OBS status: green when connected, red otherwise
+    const obsEl = el("obsStatus");
+    function obsColour() {
+      const ok = /^connected/i.test(obsEl.textContent.trim());
+      obsEl.classList.toggle("ok", ok);
+      obsEl.classList.toggle("bad", !ok);
+    }
+    obsColour();
+    new MutationObserver(obsColour).observe(obsEl, { childList: true, characterData: true, subtree: true });
+
+    // shake the code box when a wrong code is entered
+    const msg = el("codeMsg");
+    new MutationObserver(function () {
+      if (msg.textContent.trim()) {
+        const i = el("codeInput");
+        i.classList.remove("shake");
+        void i.offsetWidth;
+        i.classList.add("shake");
+      }
+    }).observe(msg, { childList: true, characterData: true, subtree: true });
+  } catch (e) { console.error("design helpers:", e); }
+})();
+</script>
+</body>
+</html>
